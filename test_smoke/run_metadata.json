@@ -1,0 +1,11 @@
+{
+  "pdb": "/Users/valerialosasso/Desktop/ORION/examples/Colicin-N_1A87.pdb",
+  "theta_angles": "0:0:1",
+  "phi_angles": "0:0:1",
+  "box_size": 150.0,
+  "bin_size": 1.5,
+  "nstruc": "1",
+  "skip_wriggle": false,
+  "json_name": "smoke_lookup.json",
+  "wriggle_mode": "protein"
+}

@@ -1,0 +1,20 @@
+{
+  "mode": "protein",
+  "n_structures": 1,
+  "parameters": {
+    "BB_SD": 5,
+    "BB_WINDOW": 3,
+    "BB_ATTEMPTS": 800,
+    "BB_STRIDE": 4,
+    "BB_CLASH_SCALE": 0.7,
+    "AXIS_REALIGN_FLAG": "--no-axis-realign",
+    "CLASH_MODE": "off",
+    "SCRIPT": "stochastic_wriggle.py",
+    "SC_SD_BACKBONE": 0,
+    "RUN_SC_OPT": true,
+    "SC_OPT_PASSES": 4,
+    "SC_OPT_SCALE": 0.98,
+    "SC_OPT_VAR": 0.2,
+    "USE_NO_SC_FLAG": true
+  }
+}
