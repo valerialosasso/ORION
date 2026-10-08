@@ -1,0 +1,745 @@
+diff --git a/README.md b/README.md
+index a3a685b5..723be028 100644
+--- a/README.md
++++ b/README.md
+@@ -4,3 +4,72 @@ This workflow combines small stochastic torsional perturbations (“wriggling”
+ The wriggling procedure produces smoother and more experimentally realistic profiles than purely rigid-body models, while preserving the overall protein structure.
+ The resulting profiles capture the expected orientation dependence observed in neutron reflectometry experiments and provide a practical tool for rapid orientational screening.
+ 
++
++## Optional hydrogen accessibility split
++
++Install the optional dependency with `python -m pip install -r requirements-hydrogen.txt`.
++MDTraj supplies the published Shrake–Rupley SASA implementation; ORION supplies
++the covalent-parent inference and binary grouping. No PSF, force-field topology,
++or MD trajectory is required. An explicit-hydrogen, solute-only PDB is required
++(the bundled Colicin example lacks hydrogens). Add hydrogens/protonate your
++structure at the intended conditions before running ORION. Resolve alternate
++locations and use a single model. Do not include explicit water.
++
++```bash
++python run_pipeline.py --pdb protein_with_H.pdb \
++  --theta-angles 0:90:15 --phi-angles 0:90:15 \
++  --outdir orientations_H --box-size 150 --nstruc 20 \
++  --split-hydrogens --sasa-cutoff 0.0 --probe-radius 1.4 --sasa-points 960
++```
++
++The Python `main_api` accepts `split_hydrogens=True`, `sasa_cutoff_A2=0.0`,
++`probe_radius_A=1.4`, and `sasa_points=960`.
++
++- `density_H_group1.dat`: C-bound H plus buried N/O/S-bound H.
++- `density_H_group2.dat`: N/O/S-bound H with SASA strictly above the cutoff.
++- `density_H.dat`: total H, retained for existing consumers.
++- Lookup JSON gains `nH_group1` and `nH_group2`.
++- `hydrogen_classification.json`: per-conformation atom names/indices, inferred
++  parents, H SASA in A^2, and group assignments. Run metadata records parameters.
++
++Density files contain z (A), mean number density (A^-3), and sample standard
++deviation across conformations (zero for a single conformation). Their mean
++profiles satisfy `nH_group1 + nH_group2 = nH` bin by bin. Standard deviations
++are not additive.
++
++Parent inference requires exactly one heavy atom within a covalent-distance
++window: lower bound 0.60 A and upper bounds C 1.25, N 1.20, O 1.15, S 1.50 A.
++These are conservative geometric heuristics, not force-field bond assignments.
++Missing or ambiguous parents raise an error rather than silently assigning a
++group. Inspect the audit for unusual/proton-transferring structures. All H in
++the supplied solute are classified; for protein-only profiles supply protein
++coordinates only. All supplied heavy atoms, including sulfur, occlude SASA.
++
++SASA uses MDTraj elemental radii and a 1.4 A probe by default. The default zero
++cutoff means any sampled accessible surface, **not a calibrated exchange
++threshold**. Check sensitivity to the cutoff and sphere-point resolution when
++using the results quantitatively. Classification is computed separately for
++each wriggled conformation, once before rigid rotation, and reused for all its
++orientations. This avoids orientation-dependent surface-sampling noise. No
++membrane/substrate shielding is inferred if those components are absent. Local
++SASA does not establish connectivity of internal cavities to bulk solvent.
++
++The split models solvent exposure, not H/D-exchange kinetics or history.
++Buried labile H remain chemically exchangeable; conformational opening can
++allow exchange over time. The two densities can be used to apply separate H/D
++scattering weights downstream. This option does not itself change the existing
++protiated `sld_total` or introduce a D2O fraction. Existing total-SLD code still
++sums C/H/N/O only; it is not a complete sulfur/phosphorus SLD calculation.
++
++The density counter now counts individual atom centres rather than occupied
++voxels, including atoms on grid planes. Consequently regenerated densities may
++differ from earlier ORION outputs even without hydrogen splitting. Volume
++voxelisation is unchanged. With no specified box, ensemble profiles use common
++bounds so corresponding z bins align.
++
++Validation: `python -m unittest discover -s tests -p 'test_*.py' -v`.
++
++References:
++- McGibbon et al. (2015), MDTraj, *Biophysical Journal* 109, 1528–1532,
++  https://doi.org/10.1016/j.bpj.2015.08.015
++- https://mdtraj.readthedocs.io/en/stable/api/generated/mdtraj.shrake_rupley.html
+diff --git a/density_volume_profiles.py b/density_volume_profiles.py
+index 6fa4de6c..7d0a255a 100755
+--- a/density_volume_profiles.py
++++ b/density_volume_profiles.py
+@@ -6,6 +6,7 @@ from collections import defaultdict
+ import os
+ from pathlib import Path
+ import time
++import glob
+ 
+ # Define van der Waals radii for common elements 
+ van_der_waals_radii = {
+@@ -108,9 +109,8 @@ def count_cubes(atoms, min_max_coords, bin_size=0.5):
+ 
+     # Initialize 3D grid for bins and a list for slices
+     grid = np.zeros((bins_x, bins_y, bins_z), dtype=bool)
+-    grid_tocountatoms = np.zeros((bins_x, bins_y, bins_z), dtype=bool)
+     slices = [defaultdict(set) for _ in range(bins_z)]
+-    slices_tocountatoms = [defaultdict(set) for _ in range(bins_z)]
++    slices_counts = [defaultdict(int) for _ in range(bins_z)]
+     slice_occupied_cubes = [0] * bins_z
+  
+     for atom_name, x, y, z, radius in atoms:
+@@ -127,18 +127,6 @@ def count_cubes(atoms, min_max_coords, bin_size=0.5):
+         max_k = int(np.ceil((z + bin_size/2 - min_z) / bin_size))
+ 
+ 
+-   # another set of ranges of bins (indeed, 1 bin!) to take into account 
+-   # that the number density calculation is based indeed on the atom centres
+-   # (not counting atoms multiple times based on their volumes)
+-
+-        min_i1 = int(np.floor((x - min_x) / bin_size))
+-        max_i1 = int(np.ceil((x - min_x) / bin_size))
+-        min_j1 = int(np.floor((y - min_y) / bin_size))
+-        max_j1 = int(np.ceil((y - min_y) / bin_size))
+-        min_k1 = int(np.floor((z - min_z) / bin_size))
+-        max_k1 = int(np.ceil((z - min_z) / bin_size))
+-
+-
+         # Mark all affected bins and count cubes in each slice: *** with volumes ***
+         for i in range(min_i, max_i):
+             for j in range(min_j, max_j):
+@@ -149,29 +137,21 @@ def count_cubes(atoms, min_max_coords, bin_size=0.5):
+                             slice_occupied_cubes[k] += 1
+                         slices[k][atom_name].add((i, j, k))
+ 
+-       # Count atoms in each slice: *** with centres ***
+-        for i in range(min_i1, max_i1):
+-            for j in range(min_j1, max_j1):
+-                for k in range(min_k1, max_k1):
+-                    if 0 <= i < bins_x and 0 <= j < bins_y and 0 <= k < bins_z:
+-                        slices_tocountatoms[k][atom_name].add((i, j, k))
+-
+-
+-    # *** FOR NUMBER DENSITIES *** count the number of atoms per slice, set to 0 if not present 
+-
+-    slices_counts = [defaultdict(int) for _ in range(bins_z)]
+-    for k in range(bins_z): #for each slice
+-        # put counts into slices_counts
+-        for atom_type, occupied_cubes in slices_tocountatoms[k].items():
+-            slices_counts[k][atom_type] = len(occupied_cubes)
+-        # if there isn't a count for an atom, add in an explicit 0
+-        for atom_to_check in list_atom_names:
+-            if atom_to_check not in slices_counts[k].keys():
+-               slices_counts[k][atom_to_check] = 0
++        # Count each atom exactly once, including points on grid planes.
++        # The last bin includes the upper box boundary.
++        coords = (x, y, z)
++        bounds = min_max_coords
++        if all(lo <= value <= hi for value, (lo, hi) in zip(coords, bounds)):
++            k = min(int(np.floor((z - min_z) / bin_size)), bins_z - 1)
++            slices_counts[k][atom_name] += 1
++
++    for counts in slices_counts:
++        for element in list_atom_names:
++            counts.setdefault(element, 0)
+     return slice_occupied_cubes, slices_counts, bins_z
+ 
+ 
+-def calculate_volume_ND_from_atoms(atoms, box_size, bin_size):
++def calculate_volume_ND_from_atoms(atoms, box_size, bin_size, bounds=None):
+     """
+     Calculate volume fraction and number density profiles from an atom list.
+ 
+@@ -181,7 +161,9 @@ def calculate_volume_ND_from_atoms(atoms, box_size, bin_size):
+ 
+     actual_min_max_coords = calculate_min_max(atoms)
+ 
+-    if box_size == None:
++    if bounds is not None:
++        min_max_coords = bounds
++    elif box_size == None:
+         min_max_coords = actual_min_max_coords
+     else:
+         min_max_coords = (
+@@ -283,15 +265,15 @@ def average_profiles(carbon, hydrogen, nitrogen, oxygen, vol_frac, volumes_list)
+ 
+     averaged = {
+         "C_mean": c.mean(axis=0),
+-        "C_std": c.std(axis=0),
++        "C_std": c.std(axis=0).fillna(0.0),
+         "H_mean": h.mean(axis=0),
+-        "H_std": h.std(axis=0),
++        "H_std": h.std(axis=0).fillna(0.0),
+         "N_mean": n.mean(axis=0),
+-        "N_std": n.std(axis=0),
++        "N_std": n.std(axis=0).fillna(0.0),
+         "O_mean": o.mean(axis=0),
+-        "O_std": o.std(axis=0),
++        "O_std": o.std(axis=0).fillna(0.0),
+         "VF_mean": vf.mean(axis=0),
+-        "VF_std": vf.std(axis=0),
++        "VF_std": vf.std(axis=0).fillna(0.0),
+         "average_volume": sum(volumes_list) / len(volumes_list),
+     }
+ 
+@@ -308,8 +290,9 @@ def calculate_volume_ND(filename, box_size, bin_size):
+     return calculate_volume_ND_from_atoms(atoms, box_size, bin_size)
+ 
+ 
+-def calcAll(size,w_slice):
++def calcAll(size,w_slice, hydrogen_group2=None):
+     start_time = time.time()
++    split_profiles = {"H_group1": [], "H_group2": []}
+     carbon = []
+     hydrogen = []
+     oxygen = []
+@@ -333,10 +316,10 @@ def calcAll(size,w_slice):
+         frames = read_xyz_trajectory(trajectory_file)
+ 
+         inputs = []
++        use_frames = True
+         for frame in frames:
+             inputs.append(frame)
+ 
+-            use_frames = True
+ 
+     else:
+         # Old mode:
+@@ -345,6 +328,25 @@ def calcAll(size,w_slice):
+         use_frames = False
+ 
+ 
++    if not inputs:
++        raise ValueError("No coordinate conformations found in tempFiles.")
++    if not use_frames:
++        inputs = [read_file(filename) for filename in sorted(inputs)]
++    if not np.isfinite(w_slice) or w_slice <= 0:
++        raise ValueError("Bin size must be finite and positive.")
++    if size is not None and (not np.isfinite(size) or size <= 0):
++        raise ValueError("Box size must be finite and positive.")
++    if hydrogen_group2 is not None and len(hydrogen_group2) != len(inputs):
++        raise ValueError("Expected one hydrogen mask per conformation.")
++    # A common grid is essential when averaging conformations without a box.
++    if size is None:
++        coords = np.concatenate([np.array([a[1:4] for a in frame]) for frame in inputs])
++        lo = np.floor(coords.min(axis=0) / w_slice) * w_slice
++        hi = np.maximum(np.ceil(coords.max(axis=0) / w_slice) * w_slice, lo + w_slice)
++        bounds = tuple(zip(lo, hi))
++    else:
++        bounds = ((-size / 2, size / 2),) * 3
++
+     # loop over conformations
+     # In new mode, each item is a frame from trajectory.xyz.
+     # In old mode, each item is one XYZ filename.
+@@ -353,10 +355,23 @@ def calcAll(size,w_slice):
+     for input_index, item in enumerate(inputs, start=1):
+         print(f"[pvm] processing conformation {input_index}/{n_inputs}")
+ 
+-        if use_frames:
+-            values = calculate_volume_ND_from_atoms(item, box_size=size, bin_size=w_slice)
+-        else:
+-            values = calculate_volume_ND(item, box_size=size, bin_size=w_slice)
++        values = calculate_volume_ND_from_atoms(item, box_size=size, bin_size=w_slice,
++                                                bounds=bounds)
++        if hydrogen_group2 is not None:
++            mask = np.asarray(hydrogen_group2[input_index - 1], dtype=bool)
++            is_h = np.array([a[0] == 'H' for a in item])
++            if mask.shape != is_h.shape or np.any(mask & ~is_h):
++                raise ValueError("Hydrogen mask must match atom order and select only H.")
++            n_bins = len(values[3])
++            slice_volume = (bounds[0][1]-bounds[0][0]) * (bounds[1][1]-bounds[1][0]) * w_slice
++            for name, selected in (("H_group1", is_h & ~mask), ("H_group2", mask)):
++                counts = np.zeros(n_bins)
++                for index in np.flatnonzero(selected):
++                    xyz = item[index][1:4]
++                    if all(lo <= v <= hi for v, (lo, hi) in zip(xyz, bounds)):
++                        k = min(int(np.floor((xyz[2]-bounds[2][0])/w_slice)), n_bins-1)
++                        counts[k] += 1
++                split_profiles[name].append(counts / slice_volume)
+ 
+         volume_fraction = values[0]
+         volume = values[1]
+@@ -416,6 +431,15 @@ def calcAll(size,w_slice):
+     write_profile_file("density_O.dat", keys, averaged["O_mean"], averaged["O_std"], open_flag)
+     write_profile_file("vol_frac_along_z.dat", keys, averaged["VF_mean"], averaged["VF_std"], open_flag)
+ 
++    if hydrogen_group2 is not None:
++        for name, profiles in split_profiles.items():
++            frame = pd.DataFrame(profiles)
++            write_profile_file(f"density_{name}.dat", keys, frame.mean(axis=0),
++                               frame.std(axis=0).fillna(0.0), open_flag)
++        if not np.allclose(np.array(split_profiles["H_group1"]) +
++                           np.array(split_profiles["H_group2"]), np.array(hydrogen)):
++            raise RuntimeError("Hydrogen partition does not conserve total density.")
++
+     elapsed = time.time() - start_time
+     print(f"[pvm] finished profile calculation in {elapsed:.2f} s")
+ 
+@@ -437,7 +461,7 @@ def read_three_col(path):
+         pass
+     return z, mu, sd
+ 
+-def return_densities_and_volumes(input_dir, box_size=None, bin_size=0.5):
++def return_densities_and_volumes(input_dir, box_size=None, bin_size=0.5, hydrogen_group2=None):
+     """
+     Importable function (for multiconf_tilt_table). Runs the existing calcAll on 'input_dir'.
+ 
+@@ -454,7 +478,7 @@ def return_densities_and_volumes(input_dir, box_size=None, bin_size=0.5):
+               "vf": volume_fraction_profile,
+             }
+     """
+-    input_dir = Path(input_dir)
++    input_dir = Path(input_dir).resolve()
+     if not input_dir.exists():
+         raise FileNotFoundError(input_dir, "not found")
+ 
+@@ -464,7 +488,7 @@ def return_densities_and_volumes(input_dir, box_size=None, bin_size=0.5):
+     try:
+         os.chdir(str(input_dir))
+         # call the module's existing function (do not rename/change your calcAll)
+-        calcAll(size=box_size, w_slice=bin_size)
++        calcAll(size=box_size, w_slice=bin_size, hydrogen_group2=hydrogen_group2)
+     finally:
+         os.chdir(cwd0) # go back
+ 
+@@ -486,6 +510,11 @@ def return_densities_and_volumes(input_dir, box_size=None, bin_size=0.5):
+         _ , P, _ = (read_three_col(input_dir / "density_P.dat"))
+         dens["P"] = P
+ 
++    if hydrogen_group2 is not None:
++        for group in (1, 2):
++            _, values, _ = read_three_col(input_dir / f"density_H_group{group}.dat")
++            dens[f"H_group{group}"] = values
++
+     return {"z": zC, "density": dens, "vf": VF}
+ 
+ # Argument parsing
+diff --git a/hydrogen_exchange.py b/hydrogen_exchange.py
+new file mode 100644
+index 00000000..edd42a72
+--- /dev/null
++++ b/hydrogen_exchange.py
+@@ -0,0 +1,120 @@
++"""Topology-file-free H classification for ORION's solvent-exposure model.
++
++Coordinates and distances are in Angstrom; SASA is returned in Angstrom squared.
++This is a binary accessibility model, not a prediction of exchange kinetics.
++"""
++import numpy as np
++from scipy.spatial import cKDTree
++
++# Conservative covalent H-parent distance windows, not H-bond cutoffs.
++PARENT_MAX_A = {'C': 1.25, 'N': 1.20, 'O': 1.15, 'S': 1.50}
++
++
++def infer_hydrogen_parents(atoms):
++    """Return H index -> unique C/N/O/S parent, or fail on ambiguous geometry.
++
++    No atom-name convention or force-field topology is required. The input must
++    be a complete, non-periodically-split structure with explicit hydrogens.
++    """
++    elements = np.array([a[0] for a in atoms])
++    xyz = np.array([a[1:4] for a in atoms], dtype=float)
++    if not np.isfinite(xyz).all():
++        raise ValueError('Non-finite atomic coordinates.')
++    hs = np.flatnonzero(elements == 'H')
++    if not len(hs):
++        raise ValueError('Hydrogen splitting requires a PDB with explicit hydrogens; none found.')
++    heavy = np.flatnonzero(elements != 'H')
++    tree = cKDTree(xyz[heavy])
++    parents = {}
++    for h in hs:
++        candidates = []
++        for local in tree.query_ball_point(xyz[h], max(PARENT_MAX_A.values())):
++            p = heavy[local]
++            distance = np.linalg.norm(xyz[h] - xyz[p])
++            if 0.60 <= distance <= PARENT_MAX_A.get(elements[p], 0):
++                candidates.append(int(p))
++        if len(candidates) != 1:
++            raise ValueError(
++                f'H atom {h + 1}: expected one covalent C/N/O/S parent, found '
++                f'{len(candidates)} ({[p + 1 for p in candidates]}). '
++                'Check protonation, clashes, alternate locations and coordinate integrity.'
++            )
++        parents[int(h)] = candidates[0]
++    return parents
++
++
++def classify_hydrogens(atoms, sasa_cutoff_A2=0.0, probe_radius_A=1.4,
++                       n_sphere_points=960):
++    """Return per-atom group-2 mask and per-H audit records.
++
++    All supplied atoms occlude solvent. Supply solute only (no explicit water).
++    Group 1 is all remaining H. Heavy atoms are never members of either group.
++    Zero cutoff means any sampled accessible surface; it is not a calibrated
++    experimental exchange threshold. MDTraj uses elemental van der Waals radii.
++    """
++    if not np.isfinite(sasa_cutoff_A2) or sasa_cutoff_A2 < 0:
++        raise ValueError('SASA cutoff must be finite and nonnegative (A^2).')
++    if not np.isfinite(probe_radius_A) or probe_radius_A <= 0:
++        raise ValueError('Probe radius must be finite and positive (A).')
++    if int(n_sphere_points) != n_sphere_points or n_sphere_points < 1:
++        raise ValueError('n_sphere_points must be a positive integer.')
++    parents = infer_hydrogen_parents(atoms)
++    try:
++        import mdtraj as md
++    except ImportError as exc:
++        raise ImportError('Hydrogen splitting needs MDTraj: pip install mdtraj') from exc
++    # SASA only needs elements and coordinates, not a bonded topology file.
++    topology = md.Topology()
++    residue = topology.add_residue('SOL', topology.add_chain())
++    for i, atom in enumerate(atoms):
++        topology.add_atom(f'{atom[0]}{i}', md.element.get_by_symbol(atom[0]), residue)
++    xyz_nm = np.array([a[1:4] for a in atoms], dtype=float)[None, :, :] / 10.0
++    trajectory = md.Trajectory(xyz_nm, topology)
++    sasa = md.shrake_rupley(trajectory, mode='atom',
++                           probe_radius=probe_radius_A / 10.0,
++                           n_sphere_points=int(n_sphere_points))[0] * 100.0
++    group2 = np.zeros(len(atoms), dtype=bool)
++    records = []
++    for h, p in parents.items():
++        labile = atoms[p][0] in {'N', 'O', 'S'}
++        group2[h] = labile and sasa[h] > sasa_cutoff_A2
++        records.append({'atom_index_1based': h + 1, 'parent_index_1based': p + 1,
++                        'parent_element': atoms[p][0], 'sasa_A2': float(sasa[h]),
++                        'group': 2 if group2[h] else 1})
++    return group2, records
++
++
++def classify_pdbs(paths, **options):
++    """Classify each conformation before rotation; reject water/multiple models.
++
++    Atom order must be preserved across the ensemble, as in ORION wriggling.
++    PDB names/serials are retained in the audit report, not needed for bonding.
++    """
++    from io_utils import pdb_to_atoms
++    masks, reports = [], []
++    identity = None
++    for path in paths:
++        lines = path.read_text().splitlines()
++        if sum(line.startswith('MODEL ') for line in lines) > 1:
++            raise ValueError(f'{path}: use one PDB model per conformation.')
++        rows = [line for line in lines if line.startswith(('ATOM  ', 'HETATM'))]
++        if any(line[16:17].strip() for line in rows):
++            raise ValueError(f'{path}: resolve alternate locations before splitting H.')
++        if any(line[17:20].strip() in {'HOH', 'WAT', 'SOL', 'TIP', 'DOD'} for line in rows):
++            raise ValueError(f'{path}: remove explicit water before solute SASA calculation.')
++        atoms = pdb_to_atoms(path)
++        if len(rows) != len(atoms):
++            raise ValueError(f'{path}: malformed coordinate records.')
++        current = [(line[12:27], atom[0]) for line, atom in zip(rows, atoms)]
++        if identity is not None and current != identity:
++            raise ValueError(f'{path}: atom identities/order differ between conformations.')
++        identity = current
++        mask, records = classify_hydrogens(atoms, **options)
++        for record in records:
++            line = rows[record['atom_index_1based'] - 1]
++            record.update(pdb_serial=line[6:11].strip(), atom_name=line[12:16].strip(),
++                          residue=line[17:20].strip(), chain=line[21:22].strip(),
++                          residue_id=line[22:27].strip())
++        masks.append(mask)
++        reports.append({'pdb': str(path), 'hydrogens': records})
++    return masks, reports
+diff --git a/requirements-hydrogen.txt b/requirements-hydrogen.txt
+new file mode 100644
+index 00000000..1f7fd742
+--- /dev/null
++++ b/requirements-hydrogen.txt
+@@ -0,0 +1,2 @@
++-r requirements.txt
++mdtraj>=1.9.9
+diff --git a/run_pipeline.py b/run_pipeline.py
+index 0b7ab0c4..044e4420 100644
+--- a/run_pipeline.py
++++ b/run_pipeline.py
+@@ -31,7 +31,8 @@ from workflow_utils import clean_distributions, parse_angle_spec, ensure_stochas
+ # ------------------------ main API / pipeline helpers ------------------------
+ 
+ def write_run_metadata(out_root, pdb, theta_angles, phi_angles, box_size,
+-                       bin_size, nstruc, skip_wriggle, json_name, wriggle_mode):
++                       bin_size, nstruc, skip_wriggle, json_name, wriggle_mode,
++                       hydrogen_options=None):
+     """Write a small metadata file describing the current run."""
+     metadata = {
+         "pdb": str(pdb),
+@@ -43,6 +44,7 @@ def write_run_metadata(out_root, pdb, theta_angles, phi_angles, box_size,
+         "skip_wriggle": skip_wriggle,
+         "json_name": json_name,
+         "wriggle_mode": wriggle_mode,
++        "hydrogen_split": hydrogen_options,
+     }
+ 
+     metadata_path = out_root / "run_metadata.json"
+@@ -187,7 +189,7 @@ def rotate_wriggled_structures_for_orientation(wriggled_pdbs, theta, phi, orient
+ 
+ 
+ 
+-def compute_profiles_for_orientation(orient_dir, box_size, bin_size):
++def compute_profiles_for_orientation(orient_dir, box_size, bin_size, hydrogen_group2=None):
+     """
+     Run volume fraction / number density calculation and compute SLDs.
+     """
+@@ -197,7 +199,7 @@ def compute_profiles_for_orientation(orient_dir, box_size, bin_size):
+     os.chdir(str(orient_dir))  # go to the dir containing xyz
+ 
+     try:
+-        dvp.calcAll(size=box_size, w_slice=bin_size)
++        dvp.calcAll(size=box_size, w_slice=bin_size, hydrogen_group2=hydrogen_group2)
+     finally:
+         os.chdir(prev_cwd)
+ 
+@@ -242,10 +244,17 @@ def build_lookup_entry(orient_dir, theta, phi, box_size, sld):
+         "sld_total": list(map(float, sld)),
+     }
+ 
++    for group in (1, 2):
++        path = orient_dir / f"density_H_group{group}.dat"
++        if path.exists():
++            _, density, _ = read_density_dat(path)
++            entry[f"nH_group{group}"] = list(map(float, density))
++
+     return entry
+ 
+ 
+-def run_single_orientation(wriggled_pdbs, out_root, theta, phi, box_size, bin_size):
++def run_single_orientation(wriggled_pdbs, out_root, theta, phi, box_size, bin_size,
++                           hydrogen_group2=None):
+     """
+     Run the full calculation for one theta/phi orientation.
+     """
+@@ -270,6 +279,7 @@ def run_single_orientation(wriggled_pdbs, out_root, theta, phi, box_size, bin_si
+         orient_dir=orient_dir,
+         box_size=box_size,
+         bin_size=bin_size,
++        hydrogen_group2=hydrogen_group2,
+     )
+ 
+     # Build and return one lookup-table entry
+@@ -284,7 +294,8 @@ def run_single_orientation(wriggled_pdbs, out_root, theta, phi, box_size, bin_si
+     return entry
+ 
+ 
+-def build_lookup_table(wriggled_pdbs, out_root, thetas, phis, box_size, bin_size):
++def build_lookup_table(wriggled_pdbs, out_root, thetas, phis, box_size, bin_size,
++                       hydrogen_group2=None):
+     """
+     Build the full theta/phi lookup table.
+ 
+@@ -316,6 +327,7 @@ def build_lookup_table(wriggled_pdbs, out_root, thetas, phis, box_size, bin_size
+                 phi=phi,
+                 box_size=box_size,
+                 bin_size=bin_size,
++                hydrogen_group2=hydrogen_group2,
+             )
+ 
+             row.append(entry)
+@@ -351,6 +363,10 @@ def main_api(
+     sc_opt_passes=None,
+     sc_opt_scale=None,
+     sc_opt_var=None,
++    split_hydrogens=False,
++    sasa_cutoff_A2=0.0,
++    probe_radius_A=1.4,
++    sasa_points=960,
+ 
+ ):  # this is for MATLAB call with arguments
+ 
+@@ -358,6 +374,11 @@ def main_api(
+     out_root = root / outdir  # name and location of the output directory
+     out_root.mkdir(parents=True, exist_ok=True)  # create the output dir if not exists
+ 
++    hydrogen_options = ({"sasa_cutoff_A2": sasa_cutoff_A2,
++                         "probe_radius_A": probe_radius_A,
++                         "n_sphere_points": sasa_points}
++                        if split_hydrogens else None)
++
+     write_run_metadata(
+         out_root=out_root,
+         pdb=pdb,
+@@ -368,7 +389,8 @@ def main_api(
+         nstruc=nstruc,
+         skip_wriggle=skip_wriggle,
+         json_name=json_name,
+-        wriggle_mode=wriggle_mode
++        wriggle_mode=wriggle_mode,
++        hydrogen_options=hydrogen_options,
+     )
+ 
+ 
+@@ -400,6 +422,14 @@ def main_api(
+         sc_opt_var=sc_opt_var,
+         )
+ 
++    hydrogen_group2 = None
++    if split_hydrogens:
++        from hydrogen_exchange import classify_pdbs
++        hydrogen_group2, audit = classify_pdbs(wriggled_pdbs, **hydrogen_options)
++        with open(out_root / "hydrogen_classification.json", "w") as handle:
++            json.dump({"model": "per-conformation solvent accessibility; no kinetics",
++                       "options": hydrogen_options, "conformations": audit}, handle, indent=2)
++
+     # Build lookup table over all theta/phi orientations
+     full_array = build_lookup_table(
+         wriggled_pdbs=wriggled_pdbs,
+@@ -408,6 +438,7 @@ def main_api(
+         phis=phis,
+         box_size=box_size,
+         bin_size=bin_size,
++        hydrogen_group2=hydrogen_group2,
+     )
+ 
+     # Output list of dicts for MATLAB that can be imported
+@@ -442,6 +473,13 @@ def main(): # this is for CLI call
+     arg_parse.add_argument("--nstruc", default=20, help="Number of wriggled structures")
+     arg_parse.add_argument("--wriggle-mode", choices=["protein", "peptide"], default="protein", help="Preset used by wriggle_driver.py for wriggling parameters")
+ 
++    arg_parse.add_argument("--split-hydrogens", action="store_true",
++                           help="Split explicit H by inferred parent and solvent accessibility")
++    arg_parse.add_argument("--sasa-cutoff", type=float, default=0.0,
++                           help="Group-2 H SASA must exceed this value in A^2 (default: 0)")
++    arg_parse.add_argument("--probe-radius", type=float, default=1.4, help="SASA probe radius in A")
++    arg_parse.add_argument("--sasa-points", type=int, default=960)
++
+     # Optional wriggling overrides passed through to wriggle_driver.py
+     arg_parse.add_argument("--bb-sd", type=float, default=None)
+     arg_parse.add_argument("--bb-window", type=int, default=None)
+@@ -470,7 +508,9 @@ def main(): # this is for CLI call
+         bb_window=args.bb_window, bb_attempts=args.bb_attempts,
+         bb_stride=args.bb_stride, bb_clash_scale=args.bb_clash_scale,
+         sc_sd_backbone=args.sc_sd_backbone, sc_opt_passes=args.sc_opt_passes,
+-        sc_opt_scale=args.sc_opt_scale, sc_opt_var=args.sc_opt_var,)
++        sc_opt_scale=args.sc_opt_scale, sc_opt_var=args.sc_opt_var,
++        split_hydrogens=args.split_hydrogens, sasa_cutoff_A2=args.sasa_cutoff,
++        probe_radius_A=args.probe_radius, sasa_points=args.sasa_points)
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/tests/test_hydrogen_exchange.py b/tests/test_hydrogen_exchange.py
+new file mode 100644
+index 00000000..2517e45e
+--- /dev/null
++++ b/tests/test_hydrogen_exchange.py
+@@ -0,0 +1,101 @@
++import contextlib
++import io
++import json
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++import numpy as np
++from hydrogen_exchange import classify_hydrogens, infer_hydrogen_parents
++from density_volume_profiles import count_cubes, calcAll
++from io_utils import write_xyz_trajectory
++from run_pipeline import main_api
++
++
++class HydrogenTests(unittest.TestCase):
++    def test_chemistry_and_accessibility(self):
++        atoms = [('C', -6, 0, 0), ('H', -5, 0, 0),
++                 ('N', 0, 0, 0), ('H', 1, 0, 0),
++                 ('O', 6, 0, 0), ('H', 7, 0, 0),
++                 ('S', 12, 0, 0), ('H', 13.34, 0, 0)]
++        mask, records = classify_hydrogens(atoms)
++        np.testing.assert_array_equal(mask, [False, False, False, True, False, True, False, True])
++        self.assertGreater(records[0]['sasa_A2'], 0)
++        mask, _ = classify_hydrogens(atoms, sasa_cutoff_A2=1000)
++        self.assertFalse(mask.any())
++        buried = [('N', -1, 0, 0), ('H', 0, 0, 0)]
++        for axis in range(3):
++            for sign in (-1, 1):
++                xyz = [0., 0., 0.]
++                xyz[axis] = sign * 2.5
++                buried.append(('C', *xyz))
++        mask, records = classify_hydrogens(buried)
++        self.assertFalse(mask.any())
++        self.assertEqual(records[0]['sasa_A2'], 0)
++
++    def test_bad_geometry_fails(self):
++        for atoms in ([('C', 0, 0, 0)], [('H', 0, 0, 0), ('N', 3, 0, 0)],
++                      [('H', 0, 0, 0), ('N', 1, 0, 0), ('C', -1, 0, 0)]):
++            with self.assertRaises(ValueError):
++                infer_hydrogen_parents(atoms)
++
++    def test_atoms_not_occupied_cells(self):
++        atoms = [('H', 0, 0, 0, 1.2), ('H', .1, .1, .1, 1.2), ('H', 2, 2, 2, 1.2)]
++        _, counts, _ = count_cubes(atoms, ((-2, 2),)*3, 1)
++        self.assertEqual(sum(c['H'] for c in counts), 3)
++
++    def test_partition_common_grid_and_single_frame_std(self):
++        frames = [[('N', 0, 0, 0), ('H', 1, 0, 0)],
++                  [('N', 0, 0, 1), ('H', 1, 0, 1)]]
++        with tempfile.TemporaryDirectory() as folder:
++            prev = os.getcwd()
++            try:
++                os.chdir(folder)
++                write_xyz_trajectory('tempFiles/trajectory.xyz', frames)
++                with contextlib.redirect_stdout(io.StringIO()):
++                    calcAll(None, .5, [[False, True], [False, False]])
++                total = np.loadtxt('density_H.dat')
++                g1 = np.loadtxt('density_H_group1.dat')
++                g2 = np.loadtxt('density_H_group2.dat')
++                np.testing.assert_allclose(g1[:,1]+g2[:,1], total[:,1])
++                self.assertTrue(np.isfinite(total).all())
++                self.assertGreater(g1[:,1].sum(), 0)
++                self.assertGreater(g2[:,1].sum(), 0)
++            finally:
++                os.chdir(prev)
++
++    def test_pipeline_and_rotation_reuse(self):
++        atom_data = [('N','N',0,0,0), ('H','H',-1,0,0), ('CA','C',1.45,0,0),
++                     ('HA2','H',1.45,1.05,0), ('C','C',2.1,-1.35,0),
++                     ('O','O',1.6,-2.4,0)]
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            pdb = root/'input.pdb'
++            pdb.write_text(''.join(
++                f'ATOM  {i:5d} {name:^4s} GLY A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {el:>2s}\n'
++                for i,(name,el,x,y,z) in enumerate(atom_data,1))+'END\n')
++            structures=root/'out'/'wriggles_base'/'structures'
++            structures.mkdir(parents=True)
++            (structures/'conf_001.pdb').write_text(pdb.read_text())
++            prev = os.getcwd()
++            try:
++                os.chdir(root)
++                with contextlib.redirect_stdout(io.StringIO()):
++                    result=main_api(pdb, outdir=str(root/'out'), skip_wriggle=True,
++                                    theta_angles='0:90:90', phi_angles='0:0:1',
++                                    box_size=20, bin_size=1, split_hydrogens=True)
++                for row in result:
++                    entry=row[0]
++                    np.testing.assert_allclose(np.array(entry['nH_group1'])+entry['nH_group2'], entry['nH'])
++                    self.assertAlmostEqual(sum(entry['nH'])*400, 2)
++                    self.assertAlmostEqual(sum(entry['nH_group2'])*400, 1)
++                audit=json.loads((root/'out'/'hydrogen_classification.json').read_text())
++                self.assertEqual(len(audit['conformations']),1)
++                self.assertTrue(np.isfinite(np.loadtxt(root/'out'/'theta0_phi0'/'density_H_group1.dat')).all())
++            finally:
++                os.chdir(prev)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/workflow_utils.py b/workflow_utils.py
+index 09f254e5..d2e2f0e1 100644
+--- a/workflow_utils.py
++++ b/workflow_utils.py
+@@ -14,7 +14,7 @@ from pathlib import Path
+ # files that get produced during density / SLD calculation
+ DISTRIBUTION_FILES = [
+     "density_C.dat", "density_H.dat", "density_N.dat", "density_O.dat",
+-    "density_P.dat",
++    "density_P.dat", "density_H_group1.dat", "density_H_group2.dat",
+     "vol_frac_along_z.dat",
+     "sld_C.dat", "sld_H.dat", "sld_N.dat", "sld_O.dat", "sld_total.dat"
+ ]

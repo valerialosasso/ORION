@@ -1,0 +1,2 @@
+-r requirements.txt
+mdtraj>=1.9.9
