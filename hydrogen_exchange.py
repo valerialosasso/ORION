@@ -47,7 +47,7 @@ def classify_hydrogens(atoms, sasa_cutoff_A2=0.0, probe_radius_A=1.4,
                        n_sphere_points=960):
     """Return per-atom group-2 mask and per-H audit records.
 
-    All supplied atoms occlude solvent. Supply solute only (no explicit water).
+    All supplied atoms occlude solvent. classify_pdbs supplies solute only.
     Group 1 is all remaining H. Heavy atoms are never members of either group.
     Zero cutoff means any sampled accessible surface; it is not a calibrated
     experimental exchange threshold. MDTraj uses elemental van der Waals radii.
@@ -85,7 +85,7 @@ def classify_hydrogens(atoms, sasa_cutoff_A2=0.0, probe_radius_A=1.4,
 
 
 def classify_pdbs(paths, **options):
-    """Classify each conformation before rotation; reject water/multiple models.
+    """Classify each conformation before rotation; exclude water from SASA.
 
     Atom order must be preserved across the ensemble, as in ORION wriggling.
     PDB names/serials are retained in the audit report, not needed for bonding.
@@ -100,8 +100,6 @@ def classify_pdbs(paths, **options):
         rows = [line for line in lines if line.startswith(('ATOM  ', 'HETATM'))]
         if any(line[16:17].strip() for line in rows):
             raise ValueError(f'{path}: resolve alternate locations before splitting H.')
-        if any(line[17:20].strip() in {'HOH', 'WAT', 'SOL', 'TIP', 'DOD'} for line in rows):
-            raise ValueError(f'{path}: remove explicit water before solute SASA calculation.')
         atoms = pdb_to_atoms(path)
         if len(rows) != len(atoms):
             raise ValueError(f'{path}: malformed coordinate records.')
@@ -109,7 +107,18 @@ def classify_pdbs(paths, **options):
         if identity is not None and current != identity:
             raise ValueError(f'{path}: atom identities/order differ between conformations.')
         identity = current
-        mask, records = classify_hydrogens(atoms, **options)
+        water_names = {'HOH', 'WAT', 'SOL', 'TIP', 'DOD', 'TIP3', 'TIP4'}
+        solute_indices = [i for i, line in enumerate(rows)
+                          if line[17:20].strip().upper() not in water_names]
+        if not solute_indices:
+            raise ValueError(f'{path}: no solute atoms found.')
+        solute_atoms = [atoms[i] for i in solute_indices]
+        solute_mask, records = classify_hydrogens(solute_atoms, **options)
+        mask = np.zeros(len(atoms), dtype=bool)
+        mask[solute_indices] = solute_mask
+        for record in records:
+            record['atom_index_1based'] = solute_indices[record['atom_index_1based'] - 1] + 1
+            record['parent_index_1based'] = solute_indices[record['parent_index_1based'] - 1] + 1
         for record in records:
             line = rows[record['atom_index_1based'] - 1]
             record.update(pdb_serial=line[6:11].strip(), atom_name=line[12:16].strip(),
