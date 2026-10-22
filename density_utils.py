@@ -90,44 +90,50 @@ def convolve_same_length(data, kernel):
 
 # SLD computation (fixed sigma=2 A on densities)
 
-def compute_sld_profiles(orient_dir):  # read 2 columns from density files
-    zC, rhoC, _ = read_density_dat(orient_dir / "density_C.dat")
-    zH, rhoH, _ = read_density_dat(orient_dir / "density_H.dat")
-    zN, rhoN, _ = read_density_dat(orient_dir / "density_N.dat")
-    zO, rhoO, _ = read_density_dat(orient_dir / "density_O.dat")
-    z = zC  # values of z
+def compute_sld_profiles(orient_dir):
+    """Write raw and sigma=2 Å Gaussian-smoothed neutron SLD profiles.
 
-    dz = abs(z[1] - z[0])  # bin size
-    sigmaA = 2.0  # hard-coded smoothing sigma in A
-    k = gaussian_kernel(dz, sigmaA, truncate=3.0)
+    Include phosphorus when density_P.dat exists. Preserve the historical
+    return value: the smoothed total SLD array.
+    """
+    from pathlib import Path
 
-    # Smooth number densities
-    rhoC_s = convolve_same_length(rhoC, k)
-    rhoH_s = convolve_same_length(rhoH, k)
-    rhoN_s = convolve_same_length(rhoN, k)
-    rhoO_s = convolve_same_length(rhoO, k)
+    orient_dir = Path(orient_dir)
+    densities = {}
+    z = None
+    for element in ("C", "H", "N", "O", "P"):
+        path = orient_dir / f"density_{element}.dat"
+        if element == "P" and not path.exists():
+            continue
+        zs, rho, _ = read_density_dat(path)
+        if z is None:
+            z = zs
+        elif len(zs) != len(z) or any(abs(a - b) > 1e-6 for a, b in zip(z, zs)):
+            raise ValueError(f"Inconsistent z grid in {path}")
+        densities[element] = rho
 
-    # SLD
-    sldC = [r * B_neutron["C"] for r in rhoC_s]
-    sldH = [r * B_neutron["H"] for r in rhoH_s]
-    sldN = [r * B_neutron["N"] for r in rhoN_s]
-    sldO = [r * B_neutron["O"] for r in rhoO_s]
+    if len(z) < 2:
+        raise ValueError("At least two z bins are required for SLD calculation")
+    dz = abs(z[1] - z[0])
+    kernel = gaussian_kernel(dz, sigma=2.0, truncate=3.0)
 
-    # For each z slice, take the SLD contributions from C, H, N, O and add them up into  total SLD
-    sldTot = []
-    for c, h, n, o in zip(sldC, sldH, sldN, sldO):
-        total = c + h + n + o  # sum contributions from all elements
-        sldTot.append(total)
+    raw_total = [sum(densities[e][i] * B_neutron[e] for e in densities)
+                 for i in range(len(z))]
+    write_two_col(orient_dir / "sld_total_raw.dat", z, raw_total)
 
-    # write output files
-    write_two_col(orient_dir / "sld_C.dat", z, sldC)
-    write_two_col(orient_dir / "sld_H.dat", z, sldH)
-    write_two_col(orient_dir / "sld_N.dat", z, sldN)
-    write_two_col(orient_dir / "sld_O.dat", z, sldO)
-    write_two_col(orient_dir / "sld_total.dat", z, sldTot)
+    contributions = {}
+    for element, rho in densities.items():
+        smoothed = convolve_same_length(rho, kernel)
+        contributions[element] = [v * B_neutron[element] for v in smoothed]
+        write_two_col(orient_dir / f"sld_{element}.dat", z, contributions[element])
 
-    # return {
-    #   "z": z,              # positions along z-axis (A)
-    #  "total": sldTot  # total SLD in A^-2 (not scaled)
-    # }
-    return sldTot  # total SLD in A^-2 (not scaled)
+    # Avoid retaining an old phosphorus output when the current system has none.
+    if "P" not in densities:
+        old_p = orient_dir / "sld_P.dat"
+        if old_p.exists():
+            old_p.unlink()
+
+    smoothed_total = [sum(contributions[e][i] for e in contributions)
+                      for i in range(len(z))]
+    write_two_col(orient_dir / "sld_total.dat", z, smoothed_total)
+    return smoothed_total
