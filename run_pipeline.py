@@ -242,6 +242,7 @@ def build_lookup_entry(orient_dir, theta, phi, box_size, sld):
         "nO": list(map(float, rhoO)),
         "nP": list(map(float, nP)) if nP else [],
         "sld_total": list(map(float, sld)),
+        "sld_total_raw": [float(line.split()[1]) for line in (orient_dir / "sld_total_raw.dat").read_text().splitlines() if line.strip()],
     }
 
     for group in (1, 2):
