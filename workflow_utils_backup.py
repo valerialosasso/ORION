@@ -80,28 +80,26 @@ def parse_angle_spec(spec):
 # ------------------------ stochastic script handling ------------------------
 
 def ensure_stochastic_in_dir(orient_dir, script_name="stochastic_wriggle.py"):
-    """
-    Ensure stochastic_wriggle.py is available inside orient_dir.
-
-    This is needed because the wriggling step is executed inside each
-    orientation directory.
-
-    Strategy:
-      1. Try to create a symlink (cleaner, avoids duplication)
-      2. If that fails (e.g. filesystem restrictions), copy the file
-    """
+    """Make the wriggling script available, repairing stale or broken links."""
     orient_dir = Path(orient_dir)
-
-    # locate script in current code directory
-    script_dir = Path(__file__).resolve().parent
-    stoch_src = script_dir / script_name
+    orient_dir.mkdir(parents=True, exist_ok=True)
+    stoch_src = (Path(__file__).resolve().parent / script_name).resolve(strict=True)
     stoch_dst = orient_dir / script_name
 
-    # only create if missing
-    if not stoch_dst.exists():
-        try:
-            # try symlink first
-            stoch_dst.symlink_to(stoch_src.resolve())
-        except Exception:
-            # fallback: copy file
-            shutil.copyfile(stoch_src.resolve(), stoch_dst)
+    if stoch_dst.is_symlink():
+        if stoch_dst.exists() and stoch_dst.resolve() == stoch_src:
+            return
+        stoch_dst.unlink()  # remove stale/broken link, not its target
+    elif stoch_dst.exists():
+        if stoch_dst.is_dir():
+            raise IsADirectoryError(f"Expected a file at {stoch_dst}")
+        # Preserve a pre-existing regular file, as the original function did.
+        return
+
+    try:
+        stoch_dst.symlink_to(stoch_src)
+    except OSError:
+        # Only fall back when no destination was created.
+        if stoch_dst.is_symlink() or stoch_dst.exists():
+            raise
+        shutil.copyfile(stoch_src, stoch_dst)
