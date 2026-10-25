@@ -1,0 +1,16 @@
+{
+  "pdb": "examples/colicin.pqr",
+  "theta_angles": "0:90:30",
+  "phi_angles": "0:180:30",
+  "box_size": 120.0,
+  "bin_size": 0.5,
+  "nstruc": "2",
+  "skip_wriggle": false,
+  "json_name": "lookup.json",
+  "wriggle_mode": "protein",
+  "hydrogen_split": {
+    "sasa_cutoff_A2": 0.0,
+    "probe_radius_A": 1.4,
+    "n_sphere_points": 960
+  }
+}

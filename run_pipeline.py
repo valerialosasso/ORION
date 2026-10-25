@@ -395,6 +395,17 @@ def main_api(
     )
 
 
+    # Validate the input before generating potentially expensive conformations.
+    from pqr_support import convert_pqr_to_pdb, validate_pdb
+    input_path = Path(pdb).resolve()
+    if input_path.suffix.lower() == ".pqr":
+        converted = out_root / "input_converted.pdb"
+        convert_pqr_to_pdb(input_path, converted)
+        pdb = str(converted)
+    elif input_path.suffix.lower() != ".pdb":
+        raise ValueError("ORION accepts .pdb or .pqr input files")
+    validate_pdb(pdb, require_hydrogens=split_hydrogens)
+
     # Clean any old distributions in top level
     clean_distributions(root)
 
