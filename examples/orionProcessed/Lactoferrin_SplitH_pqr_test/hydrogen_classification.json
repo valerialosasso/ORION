@@ -7,7 +7,7 @@
   },
   "conformations": [
     {
-      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/../../orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_001.pdb",
+      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_001.pdb",
       "hydrogens": [
         {
           "atom_index_1based": 6,
@@ -62640,7 +62640,7 @@
       ]
     },
     {
-      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/../../orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_002.pdb",
+      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_002.pdb",
       "hydrogens": [
         {
           "atom_index_1based": 6,
@@ -125273,7 +125273,7 @@
       ]
     },
     {
-      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/../../orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_003.pdb",
+      "pdb": "/Users/valerialosasso/Desktop/ORION/examples/orionProcessed/Lactoferrin_SplitH_pqr_test/wriggles_base/structures/conf_003.pdb",
       "hydrogens": [
         {
           "atom_index_1based": 6,

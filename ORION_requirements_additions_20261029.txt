@@ -1,0 +1,3 @@
+# Required for ORION hydrogen classification (add to existing requirements.txt)
+scipy
+mdtraj

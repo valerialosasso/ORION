@@ -1,11 +1,11 @@
 {
-  "pdb": "Lactoferrin_H_tdoubq1d.pqr",
-  "theta_angles": "0:180:5",
-  "phi_angles": "0:180:5",
+  "pdb": "examples/Lactoferrin_H_tdoubq1d.pqr",
+  "theta_angles": "0:20:10",
+  "phi_angles": "0:20:10",
   "box_size": 150.0,
   "bin_size": 0.5,
   "nstruc": "3",
-  "skip_wriggle": false,
+  "skip_wriggle": true,
   "json_name": "lookup.json",
   "wriggle_mode": "protein",
   "hydrogen_split": {

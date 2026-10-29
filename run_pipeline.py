@@ -80,6 +80,23 @@ def prepare_wriggled_structures(
     All orientation folders later reuse the same wriggled structures.
     """
 
+    # Reuse only a complete, consecutively numbered ensemble.
+    if skip_wriggle:
+        structures_dir = Path(out_root) / "wriggles_base" / "structures"
+        expected = [structures_dir / f"conf_{i:03d}.pdb" for i in range(1, int(nstruc) + 1)]
+        existing = sorted(structures_dir.glob("*.pdb"))
+        missing = [str(f.name) for f in expected if not f.is_file()]
+        extras = [f.name for f in existing if f not in expected]
+        if missing or extras:
+            raise RuntimeError(
+                f"Cannot reuse wriggled conformations in {structures_dir}: "
+                f"expected exactly {nstruc} files conf_001.pdb ... conf_{int(nstruc):03d}.pdb; "
+                f"missing={missing[:10]}, unexpected={extras[:10]}. "
+                "Use the original --outdir or regenerate the ensemble."
+            )
+        print(f"Reusing {len(expected)} existing wriggled conformations from {structures_dir}")
+        return expected
+
     # Wriggle only once, in a shared base directory
     wriggles_base = out_root / "wriggles_base"
     wriggles_base.mkdir(parents=True, exist_ok=True)
@@ -394,6 +411,17 @@ def main_api(
         hydrogen_options=hydrogen_options,
     )
 
+
+    # Fail before generating conformations if hydrogen splitting dependencies are absent.
+    if split_hydrogens:
+        try:
+            import scipy  # noqa: F401
+            import mdtraj  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hydrogen splitting requires scipy and mdtraj in the active Python "
+                "environment. Install them with: python3 -m pip install scipy mdtraj"
+            ) from exc
 
     # Validate the input before generating potentially expensive conformations.
     from pqr_support import convert_pqr_to_pdb, validate_pdb
